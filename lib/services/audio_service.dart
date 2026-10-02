@@ -1965,9 +1965,13 @@ class MusifyAudioHandler extends BaseAudioHandler {
 
   bool _songMatches(Map song, String needle) {
     final title = song['title']?.toString().toLowerCase() ?? '';
-    if (title.contains(needle)) return true;
     final artist = song['artist']?.toString().toLowerCase() ?? '';
-    return artist.contains(needle);
+    if (title.contains(needle) || artist.contains(needle)) return true;
+
+    // "song by artist" style queries: every word must hit the title or artist.
+    final words = needle.split(RegExp(r'\s+')).where((w) => w.isNotEmpty);
+    return words.length > 1 &&
+        words.every((w) => title.contains(w) || artist.contains(w));
   }
 
   Future<List<Map>> _searchSongs(String query) async {
@@ -2033,13 +2037,58 @@ class MusifyAudioHandler extends BaseAudioHandler {
     }
   }
 
+  /// Voice assistants (Gemini, Google Assistant) pass the spoken request as
+  /// structured extras and often leave the query string empty.
+  String _voiceString(Map<String, dynamic>? extras, String key) =>
+      extras?[key]?.toString().trim() ?? '';
+
+  String _voiceSearchQuery(String query, Map<String, dynamic>? extras) {
+    final title = _voiceString(extras, 'android.intent.extra.title');
+    final artist = _voiceString(extras, 'android.intent.extra.artist');
+    final album = _voiceString(extras, 'android.intent.extra.album');
+    final playlist = _voiceString(extras, 'android.intent.extra.playlist');
+
+    final structured = [
+      if (title.isNotEmpty) title,
+      if (artist.isNotEmpty) artist,
+      if (title.isEmpty && artist.isEmpty && album.isNotEmpty) album,
+      if (title.isEmpty && artist.isEmpty && playlist.isNotEmpty) playlist,
+    ].join(' ');
+    return structured.isNotEmpty ? structured : query.trim();
+  }
+
+  Future<bool> _playLibraryCollection(
+    String name, {
+    required bool artist,
+  }) async {
+    final needle = name.trim().toLowerCase();
+    if (needle.isEmpty) return false;
+
+    final collections = artist ? getLikedArtistItems() : _browsablePlaylists();
+    for (final collection in collections) {
+      final id = _playlistIdOf(collection);
+      final title = collection['title']?.toString().toLowerCase() ?? '';
+      if (id == null || title.isEmpty) continue;
+      if (title != needle && !title.contains(needle)) continue;
+
+      final songs = artist
+          ? await _songsForArtist(id)
+          : await _songsForPlaylist(_playlistSource(collection), id);
+      if (songs.isEmpty) continue;
+      await addPlaylistToQueue(songs, replace: true, startIndex: 0);
+      return true;
+    }
+    return false;
+  }
+
   @override
   Future<void> playFromSearch(
     String query, [
     Map<String, dynamic>? extras,
   ]) async {
     try {
-      if (query.trim().isEmpty) {
+      final searchQuery = _voiceSearchQuery(query, extras);
+      if (searchQuery.isEmpty) {
         if (_queueList.isNotEmpty) {
           await play();
           return;
@@ -2049,9 +2098,23 @@ class MusifyAudioHandler extends BaseAudioHandler {
         return;
       }
 
-      final results = await _searchSongs(query);
+      final focus = _voiceString(extras, 'android.intent.extra.focus');
+      final wantsArtist = focus.endsWith('/artist');
+      final wantsPlaylist = focus.endsWith('/playlist');
+      final hasSong = _voiceString(
+        extras,
+        'android.intent.extra.title',
+      ).isNotEmpty;
+
+      if (!hasSong &&
+          (wantsArtist || wantsPlaylist) &&
+          await _playLibraryCollection(searchQuery, artist: wantsArtist)) {
+        return;
+      }
+
+      final results = await _searchSongs(searchQuery);
       if (results.isEmpty) {
-        logger.log('playFromSearch: no match for "$query"');
+        logger.log('playFromSearch: no match for "$searchQuery"');
         return;
       }
 
