@@ -31,6 +31,7 @@ import 'package:musify/models/position_data.dart';
 import 'package:musify/services/common_services.dart';
 import 'package:musify/services/data_manager.dart';
 import 'package:musify/services/listening_stats_service.dart';
+import 'package:musify/services/playlists_manager.dart';
 import 'package:musify/services/settings_manager.dart';
 import 'package:musify/utilities/map_utils.dart';
 import 'package:musify/utilities/media_duration.dart';
@@ -1604,6 +1605,63 @@ class MusifyAudioHandler extends BaseAudioHandler {
   static const _rootOffline = 'offline_songs';
   static const _rootRecent = 'recently_played';
   static const _rootQueue = 'current_queue';
+  static const _rootPlaylists = 'library_playlists';
+  static const _rootArtists = 'library_artists';
+  static const _playlistPrefix = 'playlist:';
+  static const _artistPrefix = 'artist:';
+  static const _collectionSongSeparator = '|';
+
+  MediaItem _browsableItem(String id, String title, {Uri? artUri}) =>
+      MediaItem(
+        id: id,
+        title: title,
+        artUri: artUri,
+        playable: false,
+        extras: const {'isBrowsable': true},
+      );
+
+  Uri? _parseArtUri(dynamic image) {
+    final value = image?.toString();
+    if (value == null || value.isEmpty || value == 'null') return null;
+    return Uri.tryParse(value);
+  }
+
+  List<MediaItem> _collectionItems(Iterable<Map> collections, String prefix) {
+    return [
+      for (final c in collections)
+        if (c['ytid'] != null && c['title'] != null)
+          _browsableItem(
+            '$prefix${c['ytid']}',
+            c['title'].toString(),
+            artUri: _parseArtUri(c['image']),
+          ),
+    ];
+  }
+
+  Future<List<Map>> _collectionSongs(String collectionId) async {
+    try {
+      final isArtist = collectionId.startsWith(_artistPrefix);
+      final id = collectionId.substring(
+        isArtist ? _artistPrefix.length : _playlistPrefix.length,
+      );
+      final info = await getPlaylistInfoForWidget(id, isArtist: isArtist);
+      var songs = (info?['list'] as List?) ?? const [];
+      if (songs.isEmpty && !isArtist) {
+        songs = await getSongsFromPlaylist(id);
+      }
+      return songs
+          .whereType<Map>()
+          .where((s) => _songYtid(s) != null)
+          .toList();
+    } catch (e, stackTrace) {
+      logger.log(
+        'Error loading library collection $collectionId',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      return [];
+    }
+  }
 
   @override
   Future<List<MediaItem>> getChildren(
@@ -1638,6 +1696,8 @@ class MusifyAudioHandler extends BaseAudioHandler {
           playable: false,
           extras: {'isBrowsable': true},
         ),
+        _browsableItem(_rootPlaylists, 'Playlists'),
+        _browsableItem(_rootArtists, 'Artists'),
         const MediaItem(
           id: _rootRecent,
           title: 'Recently Played',
@@ -1648,6 +1708,13 @@ class MusifyAudioHandler extends BaseAudioHandler {
     }
 
     switch (parentMediaId) {
+      case _rootPlaylists:
+        return _collectionItems([
+          ...userCustomPlaylists.value,
+          ...getLikedPlaylistItems(),
+        ], _playlistPrefix);
+      case _rootArtists:
+        return _collectionItems(getLikedArtistItems(), _artistPrefix);
       case _rootQueue:
         return _queueList.map(_getMediaItemForQueue).toList();
       case _rootLiked:
@@ -1666,6 +1733,17 @@ class MusifyAudioHandler extends BaseAudioHandler {
             .map((s) => mapToMediaItem(s).copyWith(playable: true))
             .toList();
       default:
+        if (parentMediaId.startsWith(_playlistPrefix) ||
+            parentMediaId.startsWith(_artistPrefix)) {
+          final songs = await _collectionSongs(parentMediaId);
+          return [
+            for (final song in songs)
+              mapToMediaItem(song).copyWith(
+                id: '$parentMediaId$_collectionSongSeparator${_songYtid(song)}',
+                playable: true,
+              ),
+          ];
+        }
         return [];
     }
   }
@@ -1744,6 +1822,19 @@ class MusifyAudioHandler extends BaseAudioHandler {
     String mediaId, [
     Map<String, dynamic>? extras,
   ]) async {
+    final separator = mediaId.indexOf(_collectionSongSeparator);
+    if (separator > 0 &&
+        (mediaId.startsWith(_playlistPrefix) ||
+            mediaId.startsWith(_artistPrefix))) {
+      final songs = await _collectionSongs(mediaId.substring(0, separator));
+      final ytid = mediaId.substring(separator + 1);
+      final index = songs.indexWhere((s) => _songYtid(s) == ytid);
+      if (index != -1) {
+        await addPlaylistToQueue(songs, replace: true, startIndex: index);
+        return;
+      }
+    }
+
     final song = _findSongByYtid(_ytidFromMediaId(mediaId));
     if (song == null) {
       logger.log('No resumable song found for media id: $mediaId');
