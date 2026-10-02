@@ -38,6 +38,7 @@ import 'package:musify/utilities/playlist_utils.dart';
 import 'package:musify/widgets/dialog_item.dart';
 import 'package:musify/widgets/edit_playlist_dialog.dart';
 import 'package:musify/widgets/overflow_menu_button.dart';
+import 'package:musify/widgets/playlist_collage.dart';
 import 'package:musify/widgets/popup_menu_item.dart';
 import 'package:musify/widgets/shapes/seven_sided_cookie_shape.dart';
 import 'package:musify/widgets/spinner.dart';
@@ -333,6 +334,20 @@ class PlaylistBar extends StatelessWidget {
           height: 52,
           fit: BoxFit.cover,
           errorBuilder: (_, __, ___) => _buildIconFallback(colorScheme),
+        ),
+      );
+    }
+
+    final collageImages = isArtist
+        ? const <String>[]
+        : playlistCollageImages(playlistData);
+    if (collageImages.isNotEmpty) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: PlaylistCollage(
+          images: collageImages,
+          size: 52,
+          fallback: _buildIconFallback(colorScheme),
         ),
       );
     }
